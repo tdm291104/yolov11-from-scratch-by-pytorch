@@ -39,7 +39,7 @@ class Conv(torch.nn.Module):
         return self.relu(self.conv(x))
 
 
-class Residual(torch.nn.Module):
+class Bottleneck(torch.nn.Module):
     def __init__(self, ch, e=0.5):
         super().__init__()
         self.conv1 = Conv(ch, int(ch * e), torch.nn.SiLU(), k=3, p=1)
@@ -55,8 +55,8 @@ class C3KModule(torch.nn.Module):
         self.conv1 = Conv(in_ch, out_ch // 2, torch.nn.SiLU())
         self.conv2 = Conv(in_ch, out_ch // 2, torch.nn.SiLU())
         self.conv3 = Conv(2 * (out_ch // 2), out_ch, torch.nn.SiLU())
-        self.res_m = torch.nn.Sequential(Residual(out_ch // 2, e=1.0),
-                                         Residual(out_ch // 2, e=1.0))
+        self.res_m = torch.nn.Sequential(Bottleneck(out_ch // 2, e=1.0),
+                                         Bottleneck(out_ch // 2, e=1.0))
 
     def forward(self, x):
         y = self.res_m(self.conv1(x))
@@ -70,7 +70,7 @@ class C3K2(torch.nn.Module):
         self.conv2 = Conv((2 + n) * (out_ch // r), out_ch, torch.nn.SiLU())
 
         if not csp:
-            self.res_m = torch.nn.ModuleList(Residual(out_ch // r) for _ in range(n))
+            self.res_m = torch.nn.ModuleList(Bottleneck(out_ch // r) for _ in range(n))
         else:
             self.res_m = torch.nn.ModuleList(C3KModule(out_ch // r, out_ch // r) for _ in range(n))
 
@@ -80,7 +80,7 @@ class C3K2(torch.nn.Module):
         return self.conv2(torch.cat(y, dim=1))
 
 
-class SPP(torch.nn.Module):
+class SPPF(torch.nn.Module):
     def __init__(self, in_ch, out_ch, k=5):
         super().__init__()
         self.conv1 = Conv(in_ch, in_ch // 2, torch.nn.SiLU())
@@ -91,7 +91,8 @@ class SPP(torch.nn.Module):
         x = self.conv1(x)
         y1 = self.res_m(x)
         y2 = self.res_m(y1)
-        return self.conv2(torch.cat(tensors=[x, y1, y2, self.res_m(y2)], dim=1))
+        y3 = self.res_m(y2)
+        return self.conv2(torch.cat(tensors=[x, y1, y2, y3], dim=1))
 
 
 class Attention(torch.nn.Module):
@@ -132,6 +133,7 @@ class PSABlock(torch.nn.Module):
                                          Conv(ch * 2, ch, torch.nn.Identity()))
 
     def forward(self, x):
+        # Residual
         x = x + self.conv1(x)
         return x + self.conv2(x)
 
@@ -171,7 +173,7 @@ class Backbone(torch.nn.Module):
         # p5/32
         self.p5.append(Conv(width[4], width[5], torch.nn.SiLU(), k=3, s=2, p=1))
         self.p5.append(C3K2(width[5], width[5], depth[3], csp[1], r=2))
-        self.p5.append(SPP(width[5], width[5]))
+        self.p5.append(SPPF(width[5], width[5]))
         self.p5.append(C2PSA(width[5], depth[4]))
 
         self.p1 = torch.nn.Sequential(*self.p1)
