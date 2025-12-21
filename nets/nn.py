@@ -49,7 +49,7 @@ class Residual(torch.nn.Module):
         return x + self.conv2(self.conv1(x))
 
 
-class CSPModule(torch.nn.Module):
+class C3KModule(torch.nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv1 = Conv(in_ch, out_ch // 2, torch.nn.SiLU())
@@ -63,7 +63,7 @@ class CSPModule(torch.nn.Module):
         return self.conv3(torch.cat((y, self.conv2(x)), dim=1))
 
 
-class CSP(torch.nn.Module):
+class C3K2(torch.nn.Module):
     def __init__(self, in_ch, out_ch, n, csp, r):
         super().__init__()
         self.conv1 = Conv(in_ch, 2 * (out_ch // r), torch.nn.SiLU())
@@ -72,7 +72,7 @@ class CSP(torch.nn.Module):
         if not csp:
             self.res_m = torch.nn.ModuleList(Residual(out_ch // r) for _ in range(n))
         else:
-            self.res_m = torch.nn.ModuleList(CSPModule(out_ch // r, out_ch // r) for _ in range(n))
+            self.res_m = torch.nn.ModuleList(C3KModule(out_ch // r, out_ch // r) for _ in range(n))
 
     def forward(self, x):
         y = list(self.conv1(x).chunk(2, 1))
@@ -136,7 +136,7 @@ class PSABlock(torch.nn.Module):
         return x + self.conv2(x)
 
 
-class PSA(torch.nn.Module):
+class C2PSA(torch.nn.Module):
     def __init__(self, ch, n):
         super().__init__()
         self.conv1 = Conv(ch, 2 * (ch // 2), torch.nn.SiLU())
@@ -148,7 +148,7 @@ class PSA(torch.nn.Module):
         return self.conv2(torch.cat(tensors=(x, self.res_m(y)), dim=1))
 
 
-class DarkNet(torch.nn.Module):
+class Backbone(torch.nn.Module):
     def __init__(self, width, depth, csp):
         super().__init__()
         self.p1 = []
@@ -161,18 +161,18 @@ class DarkNet(torch.nn.Module):
         self.p1.append(Conv(width[0], width[1], torch.nn.SiLU(), k=3, s=2, p=1))
         # p2/4
         self.p2.append(Conv(width[1], width[2], torch.nn.SiLU(), k=3, s=2, p=1))
-        self.p2.append(CSP(width[2], width[3], depth[0], csp[0], r=4))
+        self.p2.append(C3K2(width[2], width[3], depth[0], csp[0], r=4))
         # p3/8
         self.p3.append(Conv(width[3], width[3], torch.nn.SiLU(), k=3, s=2, p=1))
-        self.p3.append(CSP(width[3], width[4], depth[1], csp[0], r=4))
+        self.p3.append(C3K2(width[3], width[4], depth[1], csp[0], r=4))
         # p4/16
         self.p4.append(Conv(width[4], width[4], torch.nn.SiLU(), k=3, s=2, p=1))
-        self.p4.append(CSP(width[4], width[4], depth[2], csp[1], r=2))
+        self.p4.append(C3K2(width[4], width[4], depth[2], csp[1], r=2))
         # p5/32
         self.p5.append(Conv(width[4], width[5], torch.nn.SiLU(), k=3, s=2, p=1))
-        self.p5.append(CSP(width[5], width[5], depth[3], csp[1], r=2))
+        self.p5.append(C3K2(width[5], width[5], depth[3], csp[1], r=2))
         self.p5.append(SPP(width[5], width[5]))
-        self.p5.append(PSA(width[5], depth[4]))
+        self.p5.append(C2PSA(width[5], depth[4]))
 
         self.p1 = torch.nn.Sequential(*self.p1)
         self.p2 = torch.nn.Sequential(*self.p2)
@@ -189,16 +189,16 @@ class DarkNet(torch.nn.Module):
         return p3, p4, p5
 
 
-class DarkFPN(torch.nn.Module):
+class Neck(torch.nn.Module):
     def __init__(self, width, depth, csp):
         super().__init__()
         self.up = torch.nn.Upsample(scale_factor=2)
-        self.h1 = CSP(width[4] + width[5], width[4], depth[5], csp[0], r=2)
-        self.h2 = CSP(width[4] + width[4], width[3], depth[5], csp[0], r=2)
+        self.h1 = C3K2(width[4] + width[5], width[4], depth[5], csp[0], r=2)
+        self.h2 = C3K2(width[4] + width[4], width[3], depth[5], csp[0], r=2)
         self.h3 = Conv(width[3], width[3], torch.nn.SiLU(), k=3, s=2, p=1)
-        self.h4 = CSP(width[3] + width[4], width[4], depth[5], csp[0], r=2)
+        self.h4 = C3K2(width[3] + width[4], width[4], depth[5], csp[0], r=2)
         self.h5 = Conv(width[4], width[4], torch.nn.SiLU(), k=3, s=2, p=1)
-        self.h6 = CSP(width[4] + width[5], width[5], depth[5], csp[1], r=2)
+        self.h6 = C3K2(width[4] + width[5], width[5], depth[5], csp[1], r=2)
 
     def forward(self, x):
         p3, p4, p5 = x
@@ -210,7 +210,6 @@ class DarkFPN(torch.nn.Module):
 
 
 class DFL(torch.nn.Module):
-    # Generalized Focal Loss
     # https://ieeexplore.ieee.org/document/9792391
     def __init__(self, ch=16):
         super().__init__()
@@ -270,8 +269,6 @@ class Head(torch.nn.Module):
         return torch.cat(tensors=(box * self.strides, cls.sigmoid()), dim=1)
 
     def initialize_biases(self):
-        # Initialize biases
-        # WARNING: requires stride availability
         for box, cls, s in zip(self.box, self.cls, self.stride):
             # box
             box[-1].bias.data[:] = 1.0
@@ -282,8 +279,8 @@ class Head(torch.nn.Module):
 class YOLO(torch.nn.Module):
     def __init__(self, width, depth, csp, num_classes):
         super().__init__()
-        self.net = DarkNet(width, depth, csp)
-        self.fpn = DarkFPN(width, depth, csp)
+        self.net = Backbone(width, depth, csp)
+        self.fpn = Neck(width, depth, csp)
 
         img_dummy = torch.zeros(1, width[0], 256, 256)
         self.head = Head(num_classes, (width[3], width[4], width[5]))
