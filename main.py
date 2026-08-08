@@ -16,6 +16,7 @@ import glob
 
 warnings.filterwarnings("ignore")
 
+
 def find_dataset_dir():
     """Find the dataset directory automatically"""
     possible_paths = [
@@ -23,16 +24,15 @@ def find_dataset_dir():
         './food-ingredients-5',
         '../food-ingredients-5',
     ]
-    
+
     for path in possible_paths:
         if os.path.exists(path) and os.path.exists(f'{path}/train/images'):
             return path
-    
+
     return 'food-ingredients-5'
 
-data_dir = find_dataset_dir()
 
-def train(args, params):
+def train(args, params, data_dir):
     # Model
     model = nn.yolo_v11_n(len(params['names']))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -49,8 +49,7 @@ def train(args, params):
     ema = util.EMA(model) if args.local_rank == 0 else None
 
     filenames = glob.glob(f'{data_dir}/train/images/*.jpg')
-    
-    # Check if dataset exists
+
     if not filenames:
         print(f"Error: No training images found in {data_dir}/train/images/")
         print(f"Current working directory: {os.getcwd()}")
@@ -110,10 +109,10 @@ def train(args, params):
                 step = i + num_steps * epoch
                 scheduler.step(step, optimizer)
 
-                samples = samples.cuda().float() / 255
+                samples = samples.to(device).float() / 255
 
                 # Forward
-                with torch.amp.autocast('cuda'):
+                with torch.amp.autocast(device.type):
                     outputs = model(samples)  # forward
                     loss_box, loss_cls, loss_dfl = criterion(outputs, targets)
 
@@ -141,7 +140,8 @@ def train(args, params):
                     if ema:
                         ema.update(model)
 
-                torch.cuda.synchronize()
+                if device.type == 'cuda':
+                    torch.cuda.synchronize()
 
                 # Log
                 if args.local_rank == 0:
@@ -152,7 +152,7 @@ def train(args, params):
 
             if args.local_rank == 0:
                 # mAP and validation losses
-                last = test(args, params, ema.ema)
+                last = test(args, params, data_dir, ema.ema)
 
                 logger.writerow({'epoch': str(epoch + 1).zfill(3),
                                  'train/box_loss': str(f'{avg_box_loss.avg:.3f}'),
@@ -187,9 +187,9 @@ def train(args, params):
 
 
 @torch.no_grad()
-def test(args, params, model=None):
+def test(args, params, data_dir, model=None):
     filenames = glob.glob(f'{data_dir}/valid/images/*.jpg')
-    
+
     if not filenames:
         print(f"Error: No validation images found in {data_dir}/valid/images/")
         print(f"Current working directory: {os.getcwd()}")
@@ -202,21 +202,23 @@ def test(args, params, model=None):
     loader = data.DataLoader(dataset, batch_size=4, shuffle=False, num_workers=4,
                              pin_memory=True, collate_fn=Dataset.collate_fn)
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     plot = False
-    if not model:
+    if model is None:
         plot = True
-        model = torch.load(f='./weights/best.pt', map_location='cuda')
+        model = torch.load(f='./weights/best.pt', map_location=device)
         model = model['model'].float().fuse()
 
     criterion = util.ComputeLoss(model, params)
-    
+
     model.eval()
+    model.half()  # Convert to FP16 once before the loop
     avg_val_box_loss = util.AverageMeter()
     avg_val_cls_loss = util.AverageMeter()
     avg_val_dfl_loss = util.AverageMeter()
 
     # Configure
-    iou_v = torch.linspace(start=0.5, end=0.95, steps=10).cuda()  # iou vector for mAP@0.5:0.95
+    iou_v = torch.linspace(start=0.5, end=0.95, steps=10).to(device)  # iou vector for mAP@0.5:0.95
     n_iou = iou_v.numel()
 
     m_pre = 0
@@ -226,28 +228,24 @@ def test(args, params, model=None):
     metrics = []
     p_bar = tqdm.tqdm(loader, desc=('%10s' * 8) % ('', 'precision', 'recall', 'mAP50', 'mAP', 'val_box', 'val_cls', 'val_dfl'))
     for samples, targets in p_bar:
-        samples = samples.cuda()
+        samples = samples.to(device)
         samples = samples / 255.  # 0 - 255 to 0.0 - 1.0
         _, _, h, w = samples.shape  # batch-size, channels, height, width
-        scale = torch.tensor((w, h, w, h)).cuda()
-        
-        # Compute validation losses - need training mode for proper outputs
+        scale = torch.tensor((w, h, w, h)).to(device)
+
+        # Compute validation losses
         model.train()
-        with torch.amp.autocast('cuda'):
-            model_outputs = model(samples)
+        with torch.amp.autocast(device.type):
+            model_outputs = model(samples.float())
             loss_box, loss_cls, loss_dfl = criterion(model_outputs, targets)
-            
-            # Update average losses
+
             avg_val_box_loss.update(loss_box.item(), samples.size(0))
             avg_val_cls_loss.update(loss_cls.item(), samples.size(0))
             avg_val_dfl_loss.update(loss_dfl.item(), samples.size(0))
-        
+
         # Switch back to eval mode for inference
         model.eval()
-        model.half()
-        samples = samples.half()
-        
-        outputs = model(samples)
+        outputs = model(samples.half())
         # NMS
         outputs = util.non_max_suppression(outputs)
         # Metrics
@@ -256,14 +254,14 @@ def test(args, params, model=None):
             cls = targets['cls'][idx]
             box = targets['box'][idx]
 
-            cls = cls.cuda()
-            box = box.cuda()
+            cls = cls.to(device)
+            box = box.to(device)
 
-            metric = torch.zeros(output.shape[0], n_iou, dtype=torch.bool).cuda()
+            metric = torch.zeros(output.shape[0], n_iou, dtype=torch.bool).to(device)
 
             if output.shape[0] == 0:
                 if cls.shape[0]:
-                    metrics.append((metric, *torch.zeros((2, 0)).cuda(), cls.squeeze(-1)))
+                    metrics.append((metric, *torch.zeros((2, 0)).to(device), cls.squeeze(-1)))
                 continue
             # Evaluate
             if cls.shape[0]:
@@ -304,7 +302,6 @@ def main():
     parser.add_argument('--input-size', default=640, type=int)
     parser.add_argument('--batch-size', default=32, type=int)
     parser.add_argument('--local-rank', default=0, type=int)
-    parser.add_argument('--local_rank', default=0, type=int)
     parser.add_argument('--epochs', default=600, type=int)
     parser.add_argument('--train', action='store_true')
     parser.add_argument('--test', action='store_true')
@@ -325,7 +322,9 @@ def main():
 
     with open('utils/args.yaml', errors='ignore') as f:
         params = yaml.safe_load(f)
-    
+
+    data_dir = find_dataset_dir()
+
     # Debug information
     if args.local_rank == 0:
         print(f"Dataset directory: {data_dir}")
@@ -345,9 +344,9 @@ def main():
     profile(args, params)
 
     if args.train:
-        train(args, params)
+        train(args, params, data_dir)
     if args.test:
-        test(args, params)
+        test(args, params, data_dir)
 
     # Clean
     if args.distributed:

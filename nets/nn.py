@@ -227,11 +227,10 @@ class DFL(torch.nn.Module):
 
 
 class Head(torch.nn.Module):
-    anchors = torch.empty(0)
-    strides = torch.empty(0)
-
     def __init__(self, nc=80, filters=()):
         super().__init__()
+        self.anchors = torch.empty(0)
+        self.strides = torch.empty(0)
         self.ch = 16  # DFL channels
         self.nc = nc  # number of classes
         self.nl = len(filters)  # number of detection layers

@@ -73,12 +73,12 @@ def export_onnx(args):
     # https://github.com/ultralytics/ultralytics/blob/main/ultralytics/nn/autobackend.py
 
 
-def wh2xy(x):
+def wh2xy(x, w=1, h=1, pad_w=0, pad_h=0):
     y = x.clone() if isinstance(x, torch.Tensor) else numpy.copy(x)
-    y[:, 0] = x[:, 0] - x[:, 2] / 2  # top left x
-    y[:, 1] = x[:, 1] - x[:, 3] / 2  # top left y
-    y[:, 2] = x[:, 0] + x[:, 2] / 2  # bottom right x
-    y[:, 3] = x[:, 1] + x[:, 3] / 2  # bottom right y
+    y[:, 0] = w * (x[:, 0] - x[:, 2] / 2) + pad_w
+    y[:, 1] = h * (x[:, 1] - x[:, 3] / 2) + pad_h
+    y[:, 2] = w * (x[:, 0] + x[:, 2] / 2) + pad_w
+    y[:, 3] = h * (x[:, 1] + x[:, 3] / 2) + pad_h
     return y
 
 
@@ -306,8 +306,8 @@ def compute_iou(box1, box2, eps=1e-7):
     # Get the coordinates of bounding boxes
     b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
     b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
-    w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
-    w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+    w1, h1 = b1_x2 - b1_x1 + eps, b1_y2 - b1_y1 + eps
+    w2, h2 = b2_x2 - b2_x1 + eps, b2_y2 - b2_y1 + eps
 
     # Intersection area
     inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp(0) * \
@@ -521,9 +521,7 @@ class Assigner(torch.nn.Module):
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
 
         top_k_mask = mask_gt.expand(-1, -1, self.top_k).bool()
-        top_k_metrics, top_k_indices = torch.topk(align_metric, self.top_k, dim=-1, largest=True)
-        if top_k_mask is None:
-            top_k_mask = (top_k_metrics.max(-1, keepdim=True)[0] > self.eps).expand_as(top_k_indices)
+        _, top_k_indices = torch.topk(align_metric, self.top_k, dim=-1, largest=True)
         top_k_indices.masked_fill_(~top_k_mask, 0)
 
         mask_top_k = torch.zeros(align_metric.shape, dtype=torch.int8, device=top_k_indices.device)

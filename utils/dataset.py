@@ -8,6 +8,8 @@ import torch
 from PIL import Image
 from torch.utils import data
 
+from utils.util import wh2xy
+
 FORMATS = 'bmp', 'dng', 'jpeg', 'jpg', 'mpo', 'png', 'tif', 'tiff', 'webp'
 
 
@@ -98,6 +100,8 @@ class Dataset(data.Dataset):
 
     def load_image(self, i):
         image = cv2.imread(self.filenames[i])
+        if image is None:
+            raise FileNotFoundError(f'Image not found or unreadable: {self.filenames[i]}')
         h, w = image.shape[:2]
         r = self.input_size / max(h, w)
         if r != 1:
@@ -260,17 +264,6 @@ class Dataset(data.Dataset):
             x[filename] = label
         torch.save(x, path)
         return x
-
-
-def wh2xy(x, w=640, h=640, pad_w=0, pad_h=0):
-    # Convert nx4 boxes
-    # from [x, y, w, h] normalized to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
-    y = numpy.copy(x)
-    y[:, 0] = w * (x[:, 0] - x[:, 2] / 2) + pad_w  # top left x
-    y[:, 1] = h * (x[:, 1] - x[:, 3] / 2) + pad_h  # top left y
-    y[:, 2] = w * (x[:, 0] + x[:, 2] / 2) + pad_w  # bottom right x
-    y[:, 3] = h * (x[:, 1] + x[:, 3] / 2) + pad_h  # bottom right y
-    return y
 
 
 def xy2wh(x, w, h):
