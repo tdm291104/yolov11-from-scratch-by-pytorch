@@ -1,38 +1,43 @@
 # YOLOv11 from Scratch — PyTorch
 
-YOLOv11-nano được implement từ đầu bằng PyTorch, không dùng Ultralytics. Bao gồm backbone C3K2 + C2PSA, neck FPN, head DFL, và training pipeline đầy đủ.
+A clean PyTorch implementation of YOLOv11-nano built from scratch, without relying on Ultralytics. Includes the full training pipeline: C3K2 + C2PSA backbone, FPN neck, DFL head, TAL assignment, mosaic/MixUp augmentation, EMA, and AMP training.
 
-## Kiến trúc
+## Architecture
 
 ```
 Input → Backbone (C3K2 + SPPF + C2PSA) → Neck (FPN) → Head (DFL) → Detections
 ```
 
-- **Backbone**: Conv → C3K2 (p2–p4) → SPPF → C2PSA (p5)
-- **Neck**: FPN upsample + downsample path
-- **Head**: Decoupled box (DFL) + class branch, TAL assignment
+| Component | Details |
+|-----------|---------|
+| **Backbone** | Conv stem → C3K2 blocks (P2–P4) → SPPF → C2PSA (P5) |
+| **Neck** | FPN with upsample top-down path + downsample bottom-up path |
+| **Head** | Decoupled box (DFL, 16 bins) + classification branch |
+| **Assignment** | Task-Aligned Learning (TAL) with top-k anchor selection |
 
-## Cài đặt
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Chuẩn bị dataset
+> Requires Python ≥ 3.9 and PyTorch ≥ 2.0.
 
-Dataset cần theo cấu trúc YOLO chuẩn:
+## Dataset
+
+The dataset must follow standard YOLO format:
 
 ```
-food-ingredients-5/
+<dataset>/
 ├── train/
-│   ├── images/   # *.jpg
-│   └── labels/   # *.txt  (class cx cy w h, normalized)
+│   ├── images/       # *.jpg
+│   └── labels/       # *.txt — one line per object: <class> <cx> <cy> <w> <h> (normalized)
 └── valid/
     ├── images/
     └── labels/
 ```
 
-Các class được khai báo trong `utils/args.yaml` (field `names`).
+Place the dataset folder in the project root. Class names are declared in `utils/args.yaml` under the `names` field.
 
 ## Training
 
@@ -40,11 +45,11 @@ Các class được khai báo trong `utils/args.yaml` (field `names`).
 # Single GPU
 python main.py --train --epochs 600 --batch-size 32 --input-size 640
 
-# Multi-GPU (torchrun)
-bash main.sh <num_gpus> --train --epochs 600 --batch-size 32
+# Multi-GPU
+bash main.sh <num_gpus> --train --epochs 600 --batch-size 32 --input-size 640
 ```
 
-Log được ghi vào `weights/step.csv`.
+Training logs (loss, mAP, precision, recall) are written to `weights/step.csv` each epoch.
 
 ## Validation
 
@@ -52,44 +57,45 @@ Log được ghi vào `weights/step.csv`.
 python main.py --test --input-size 640
 ```
 
-Kết quả in ra precision, recall, mAP@0.5, mAP@0.5:0.95 và validation loss.
+Prints precision, recall, mAP@0.5, and mAP@0.5:0.95 against `best.pt`.
 
-## Export ONNX
+## Export to ONNX
 
 ```python
 from utils.util import export_onnx
 import argparse
 
-args = argparse.Namespace(input_size=640)
-export_onnx(args)
+export_onnx(argparse.Namespace(input_size=640))
 # Output: weights/best.onnx
 ```
 
-## Cấu trúc project
+## Project Structure
 
 ```
 ├── main.py              # Training & validation entry point
 ├── main.sh              # Multi-GPU launcher (torchrun)
+├── requirements.txt
 ├── nets/
-│   └── nn.py            # Model: Backbone, Neck, Head, YOLO
-├── utils/
-│   ├── args.yaml        # Hyperparameters & class names
-│   ├── dataset.py       # Dataset, augmentation (mosaic, MixUp, HSV, ...)
-│   └── util.py          # Loss, metrics, LR scheduler, EMA, ...
-└── weights/             # Checkpoints (best.pt, last.pt)
+│   └── nn.py            # Backbone, Neck, Head, YOLO, DFL, C3K2, C2PSA, SPPF, Attention
+└── utils/
+    ├── args.yaml        # Hyperparameters & class names
+    ├── dataset.py       # Dataset loader, mosaic, MixUp, HSV, random perspective
+    └── util.py          # Loss (BoxLoss, QFL, VFL), metrics, EMA, LR schedulers
 ```
 
 ## Hyperparameters
 
-Chỉnh trong `utils/args.yaml`:
+All hyperparameters are configured in `utils/args.yaml`:
 
-| Param | Default | Mô tả |
-|-------|---------|-------|
-| `max_lr` | 0.01 | Learning rate tối đa |
-| `min_lr` | 0.0001 | Learning rate tối thiểu |
-| `epochs` | 600 | Số epoch |
-| `box` | 7.5 | Box loss weight |
-| `cls` | 0.5 | Classification loss weight |
-| `dfl` | 1.5 | DFL loss weight |
-| `mosaic` | 1.0 | Xác suất mosaic augmentation |
-| `mix_up` | 0.0 | Xác suất MixUp augmentation |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_lr` | `0.01` | Peak learning rate |
+| `min_lr` | `0.0001` | Minimum learning rate (warmup start & cosine end) |
+| `warmup_epochs` | `3` | Number of linear warmup epochs |
+| `box` | `7.5` | Box regression loss weight |
+| `cls` | `0.5` | Classification loss weight |
+| `dfl` | `1.5` | Distribution focal loss weight |
+| `mosaic` | `1.0` | Mosaic augmentation probability |
+| `mix_up` | `0.0` | MixUp augmentation probability |
+| `flip_lr` | `0.5` | Horizontal flip probability |
+| `scale` | `0.5` | Random scale range (±gain) |
