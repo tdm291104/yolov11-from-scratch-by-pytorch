@@ -58,8 +58,8 @@ def train(args, params, data_dir):
             print(f"Train images directory exists: {os.path.exists(f'{data_dir}/train/images')}")
         raise FileNotFoundError(f"No training images found in {data_dir}/train/images/")
 
-    sampler = None
     dataset = Dataset(filenames, args.input_size, params, augment=True)
+    sampler = data.distributed.DistributedSampler(dataset, shuffle=True) if args.distributed else None
 
     loader = data.DataLoader(dataset, args.batch_size, sampler is None, sampler,
                              num_workers=8, pin_memory=True, collate_fn=Dataset.collate_fn)
@@ -131,7 +131,7 @@ def train(args, params, data_dir):
                 amp_scale.scale(loss_box + loss_cls + loss_dfl).backward()
 
                 # Optimize
-                if step % accumulate == 0:
+                if (step + 1) % accumulate == 0:
                     # amp_scale.unscale_(optimizer)
                     # util.clip_gradients(model)
                     amp_scale.step(optimizer)
@@ -227,56 +227,58 @@ def test(args, params, data_dir, model=None):
     mean_ap = 0
     metrics = []
     p_bar = tqdm.tqdm(loader, desc=('%10s' * 8) % ('', 'precision', 'recall', 'mAP50', 'mAP', 'val_box', 'val_cls', 'val_dfl'))
-    for samples, targets in p_bar:
-        samples = samples.to(device)
-        samples = samples / 255.  # 0 - 255 to 0.0 - 1.0
-        _, _, h, w = samples.shape  # batch-size, channels, height, width
-        scale = torch.tensor((w, h, w, h)).to(device)
+    try:
+        for samples, targets in p_bar:
+            samples = samples.to(device)
+            samples = samples / 255.  # 0 - 255 to 0.0 - 1.0
+            _, _, h, w = samples.shape  # batch-size, channels, height, width
+            scale = torch.tensor((w, h, w, h)).to(device)
 
-        # Compute validation losses
-        model.train()
-        with torch.amp.autocast(device.type):
-            model_outputs = model(samples.float())
-            loss_box, loss_cls, loss_dfl = criterion(model_outputs, targets)
+            # Compute validation losses
+            model.train()
+            with torch.amp.autocast(device.type):
+                model_outputs = model(samples.float())
+                loss_box, loss_cls, loss_dfl = criterion(model_outputs, targets)
 
-            avg_val_box_loss.update(loss_box.item(), samples.size(0))
-            avg_val_cls_loss.update(loss_cls.item(), samples.size(0))
-            avg_val_dfl_loss.update(loss_dfl.item(), samples.size(0))
+                avg_val_box_loss.update(loss_box.item(), samples.size(0))
+                avg_val_cls_loss.update(loss_cls.item(), samples.size(0))
+                avg_val_dfl_loss.update(loss_dfl.item(), samples.size(0))
 
-        # Switch back to eval mode for inference
-        model.eval()
-        outputs = model(samples.half())
-        # NMS
-        outputs = util.non_max_suppression(outputs)
-        # Metrics
-        for i, output in enumerate(outputs):
-            idx = (targets['idx'] == i).squeeze()
-            cls = targets['cls'][idx]
-            box = targets['box'][idx]
+            # Switch back to eval mode for inference
+            model.eval()
+            outputs = model(samples.half())
+            # NMS
+            outputs = util.non_max_suppression(outputs)
+            # Metrics
+            for i, output in enumerate(outputs):
+                idx = (targets['idx'] == i).squeeze()
+                cls = targets['cls'][idx]
+                box = targets['box'][idx]
 
-            cls = cls.to(device)
-            box = box.to(device)
+                cls = cls.to(device)
+                box = box.to(device)
 
-            metric = torch.zeros(output.shape[0], n_iou, dtype=torch.bool).to(device)
+                metric = torch.zeros(output.shape[0], n_iou, dtype=torch.bool).to(device)
 
-            if output.shape[0] == 0:
+                if output.shape[0] == 0:
+                    if cls.shape[0]:
+                        metrics.append((metric, *torch.zeros((2, 0)).to(device), cls.squeeze(-1)))
+                    continue
+                # Evaluate
                 if cls.shape[0]:
-                    metrics.append((metric, *torch.zeros((2, 0)).to(device), cls.squeeze(-1)))
-                continue
-            # Evaluate
-            if cls.shape[0]:
-                target = torch.cat(tensors=(cls, util.wh2xy(box) * scale), dim=1)
-                metric = util.compute_metric(output[:, :6], target, iou_v)
-            # Append
-            metrics.append((metric, output[:, 4], output[:, 5], cls.squeeze(-1)))
+                    target = torch.cat(tensors=(cls, util.wh2xy(box) * scale), dim=1)
+                    metric = util.compute_metric(output[:, :6], target, iou_v)
+                # Append
+                metrics.append((metric, output[:, 4], output[:, 5], cls.squeeze(-1)))
 
-    metrics = [torch.cat(x, dim=0).cpu().numpy() for x in zip(*metrics)]  # to numpy
-    if len(metrics) and metrics[0].any():
-        tp, fp, m_pre, m_rec, map50, mean_ap = util.compute_ap(*metrics, plot=plot, names=params["names"])
+        metrics = [torch.cat(x, dim=0).cpu().numpy() for x in zip(*metrics)]  # to numpy
+        if len(metrics) and metrics[0].any():
+            tp, fp, m_pre, m_rec, map50, mean_ap = util.compute_ap(*metrics, plot=plot, names=params["names"])
 
-    print(('%10s' + '%10.3g' * 7) % ('', m_pre, m_rec, map50, mean_ap, avg_val_box_loss.avg, avg_val_cls_loss.avg, avg_val_dfl_loss.avg))
+        print(('%10s' + '%10.3g' * 7) % ('', m_pre, m_rec, map50, mean_ap, avg_val_box_loss.avg, avg_val_cls_loss.avg, avg_val_dfl_loss.avg))
+    finally:
+        model.float()
 
-    model.float()
     return mean_ap, map50, m_rec, m_pre, avg_val_box_loss.avg, avg_val_cls_loss.avg, avg_val_dfl_loss.avg
 
 
