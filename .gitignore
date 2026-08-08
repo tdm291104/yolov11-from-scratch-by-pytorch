@@ -1,5 +1,22 @@
 venv/
 __pycache__/
-food-ingredients-5/
 *.pyc
 *.pyo
+
+# Dataset
+food-ingredients-5/
+
+# Model weights & exports
+weights/*.pt
+weights/*.onnx
+weights/*.csv
+weights/*.png
+
+# Label cache
+*.cache
+
+# Logs
+*.log
+
+# IDE / tooling
+.claude/

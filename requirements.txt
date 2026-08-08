@@ -1,0 +1,17 @@
+# Core
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+
+# Data loading & augmentation
+opencv-python>=4.7.0
+pillow>=9.5.0
+albumentations>=1.3.0
+
+# Training utilities
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# Optional: export & profiling
+onnx>=1.14.0
+thop>=0.1.1
